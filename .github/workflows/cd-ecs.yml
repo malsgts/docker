@@ -1,0 +1,54 @@
+name: Deploy Docker Image to AWS ECS
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1                # Change as needed
+  ECS_CLUSTER: your-ecs-cluster-name   # Change as needed
+  ECS_SERVICE: your-ecs-service-name   # Change as needed
+  ECS_TASK_DEFINITION: path/to/ecs-task-def.json # e.g., aws-terraform-infra/ecs-task-def.json
+  CONTAINER_NAME: your-container-name  # Name in your task definition
+  IMAGE_TAG: latest                    # Or use github.sha for commit-specific tags
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+            --region ${{ env.AWS_REGION }} > task-def.json
+
+      - name: Update image in task definition
+        id: update-task-def
+        run: |
+          IMAGE="${{ env.DOCKER_REPO }}:${{ env.IMAGE_TAG }}"
+          jq --arg IMAGE "$IMAGE" --arg NAME "${{ env.CONTAINER_NAME }}" \
+            '.taskDefinition.containerDefinitions[] |= if .name == $NAME then .image = $IMAGE else . end' \
+            task-def.json > new-task-def.json
+
+      - name: Register new task definition
+        id: register-task-def
+        run: |
+          TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://new-task-def.json --region ${{ env.AWS_REGION }} --query "taskDefinition.taskDefinitionArn" --output text)
+          echo "::set-output name=task_def_arn::$TASK_DEF_ARN"
+
+      - name: Deploy new task definition to ECS service
+        run: |
+          aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} \
+            --task-definition ${{ steps.register-task-def.outputs.task_def_arn }} --region ${{ env.AWS_REGION }}
